@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - 'resurrect-*'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            libncurses-dev \
+            libnl-3-dev \
+            libnl-genl-3-dev \
+            pkg-config
+
+      - name: Build
+        env:
+          CC: ${{ matrix.compiler }}
+        run: make V=1
+
+  sanitizers:
+    name: Sanitizer build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            libncurses-dev \
+            libnl-3-dev \
+            libnl-genl-3-dev \
+            pkg-config
+
+      - name: Build with ASan and UBSan
+        run: |
+          make clean
+          make V=1 DEBUG=1 CC=clang \
+            CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' \
+            LDFLAGS='-fsanitize=address,undefined'
