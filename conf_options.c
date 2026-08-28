@@ -18,9 +18,12 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
 #include <err.h>
+#include <errno.h>
+#include <limits.h>
 
 #include <uwifi/util.h>
 #include <uwifi/wlan_util.h>
@@ -38,6 +41,9 @@ struct conf_option {
 	const char*	default_value;
 	bool		(*func)(const char* value);
 };
+
+#define CONF_OPTION_COUNT (sizeof(conf_options) / sizeof(struct conf_option))
+#define LONG_OPT_BASE 1000
 
 static bool conf_quiet(__attribute__((unused)) const char* value) {
 	conf.quiet = 1;
@@ -71,6 +77,46 @@ static bool conf_outfile(const char* value) {
 	return true;
 }
 
+static bool conf_output_format(const char* value) {
+	if (strcasecmp(value, "csv") == 0)
+		conf.output_format = OUTPUT_FORMAT_CSV;
+	else if (strcasecmp(value, "jsonl") == 0 || strcasecmp(value, "ndjson") == 0)
+		conf.output_format = OUTPUT_FORMAT_JSONL;
+	else {
+		LOG_ERR("Unknown output format '%s' (expected csv or jsonl)", value);
+		return false;
+	}
+	return true;
+}
+
+static bool conf_duration(const char* value) {
+	char* end = NULL;
+	unsigned long duration;
+
+	errno = 0;
+	duration = strtoul(value, &end, 10);
+	if (errno != 0 || end == value || *end != '\0' || duration > UINT_MAX) {
+		LOG_ERR("Invalid duration '%s'", value);
+		return false;
+	}
+	conf.duration = (unsigned int)duration;
+	return true;
+}
+
+static bool conf_filter_signal(const char* value) {
+	char* end = NULL;
+	long signal;
+
+	errno = 0;
+	signal = strtol(value, &end, 10);
+	if (errno != 0 || end == value || *end != '\0' || signal < -200 || signal > 0) {
+		LOG_ERR("Invalid signal threshold '%s' (expected -200..0 dBm)", value);
+		return false;
+	}
+	conf.filter_signal = (int)signal;
+	return true;
+}
+
 static bool conf_node_timeout(const char* value) {
 	conf.node_timeout = atoi(value);
 	return true;
@@ -101,7 +147,9 @@ static bool conf_channel_set(const char* value) {
 	struct uwifi_chan_spec ch;
 	ch.freq = wlan_chan2freq(n);
 	ch.width = width;
-	ch.center_freq = ch.freq + ht40plus ? 10 : -10;
+	ch.center_freq = ch.freq;
+	if (width == CHAN_WIDTH_40)
+		ch.center_freq += ht40plus ? 10 : -10;
 
 	if (conf.intf.channel_initialized)
 		uwifi_channel_change(&conf.intf, &ch);
@@ -303,29 +351,32 @@ static struct conf_option conf_options[] = {
 	/* C , NAME        VALUE REQUIRED, DEFAULT	CALLBACK */
 	{ 'q', "quiet",			0, NULL,	conf_quiet },		// NOT dynamic
 #if DEBUG
-	{ 'D', "debug", 		0, NULL,	conf_debug },		// NOT dynamic
+	{ 'D', "debug",			0, NULL,	conf_debug },		// NOT dynamic
 #endif
-	{ 'i', "interface", 		1, "wlan0",	conf_interface },	// NOT dynamic
+	{ 'i', "interface",			1, "wlan0",	conf_interface },	// NOT dynamic
 	{ 'a', "add_monitor",		0, NULL,	conf_add_monitor },
-	{ 'd', "display_interval",	1, "100", 	conf_display_interval },
-	{ 'V', "display_view",		1, NULL, 	conf_display_view },
-	{ 'o', "outfile", 		1, NULL,	conf_outfile },
-	{ 't', "node_timeout", 		1, "60",	conf_node_timeout },
-	{ 'b', "receive_buffer",	1, NULL,	conf_receive_buffer },	// NOT dynamic
-	{ 'C', "channel",		1, NULL, 	conf_channel_set },
+	{ 'd', "display_interval",	1, "100",	conf_display_interval },
+	{ 'V', "display_view",		1, NULL,	conf_display_view },
+	{ 'o', "outfile",			1, NULL,	conf_outfile },
+	{  0 , "output-format",		1, "csv",	conf_output_format },
+	{ 'T', "duration",			1, "0",		conf_duration },
+	{ 't', "node_timeout",		1, "60",	conf_node_timeout },
+	{ 'b', "receive_buffer",		1, NULL,	conf_receive_buffer },	// NOT dynamic
+	{ 'C', "channel",			1, NULL,	conf_channel_set },
 	{ 's', "channel_scan",		0, NULL,	conf_channel_scan },
 	{  0 , "channel_scan_rounds",	1, "-1",	conf_channel_scan_rounds },
-	{  0 , "channel_dwell",		1, "250", 	conf_channel_dwell },
-	{ 'u', "channel_upper",		1, NULL, 	conf_channel_upper },
-	{ 'N', "server",		0, NULL,	conf_server },		// NOT dynamic
-	{ 'n', "client",		1, NULL,	conf_client },		// NOT dynamic
+	{  0 , "channel_dwell",		1, "250",	conf_channel_dwell },
+	{ 'u', "channel_upper",		1, NULL,	conf_channel_upper },
+	{ 'N', "server",			0, NULL,	conf_server },		// NOT dynamic
+	{ 'n', "client",			1, NULL,	conf_client },		// NOT dynamic
 	{ 'p', "port",			1, "4444",	conf_port },		// NOT dynamic
 	{ 'X', "control_pipe",		2, NULL,	conf_control_pipe },	// NOT dynamic
-	{ 'e', "filter_mac", 		1, NULL,	conf_filter_mac },
-	{ 'B', "filter_bssid", 		1, NULL,	conf_filter_bssid },
-	{ 'm', "filter_mode",		1, "ALL",	conf_filter_mode },
+	{ 'e', "filter_mac",			1, NULL,	conf_filter_mac },
+	{ 'B', "filter_bssid",		1, NULL,	conf_filter_bssid },
+	{ 'm', "filter_mode",			1, "ALL",	conf_filter_mode },
 	{ 'f', "filter_packet",		1, "ALL",	conf_filter_pkt },
-	{ 'M', "mac_names",		2, NULL,	conf_mac_names },
+	{  0 , "filter-signal",		1, "0",		conf_filter_signal },
+	{ 'M', "mac_names",			2, NULL,	conf_mac_names },
 };
 
 /*
@@ -349,7 +400,7 @@ bool config_handle_option(int c, const char* name, const char* value)
 	unsigned int i;
 	char* end;
 
-	for (i=0; i < sizeof(conf_options)/sizeof(struct conf_option); i++) {
+	for (i=0; i < CONF_OPTION_COUNT; i++) {
 		if (((c != 0 && conf_options[i].option == c) ||
 		    (name != NULL && strcmp(conf_options[i].name, name) == 0)) &&
 		     conf_options[i].func != NULL) {
@@ -417,7 +468,7 @@ static void config_read_file(const char* filename)
 static void config_apply_defaults(void)
 {
 	unsigned int i;
-	for (i=0; i < sizeof(conf_options)/sizeof(struct conf_option); i++) {
+	for (i=0; i < CONF_OPTION_COUNT; i++) {
 		if (conf_options[i].default_value != NULL) {
 			conf_options[i].func(conf_options[i].default_value);
 		}
@@ -430,7 +481,7 @@ static char* config_get_getopt_string(char* buf, size_t maxlen, const char* add)
 	unsigned int i;
 	maxlen = maxlen - 1; // we use it as string index
 
-	for (i=0; i < sizeof(conf_options)/sizeof(struct conf_option) && pos < maxlen; i++) {
+	for (i=0; i < CONF_OPTION_COUNT && pos < maxlen; i++) {
 		if (conf_options[i].option != 0 && pos < maxlen) {
 			buf[pos++] = conf_options[i].option;
 			if (conf_options[i].value_required && pos < maxlen) {
@@ -455,62 +506,102 @@ static char* config_get_getopt_string(char* buf, size_t maxlen, const char* add)
 	return buf;
 }
 
+static void config_get_long_options(struct option* opts, size_t maxopts)
+{
+	unsigned int i;
+	unsigned int pos = 0;
+
+	if (maxopts < CONF_OPTION_COUNT + 5)
+		errx(1, "Not enough space for long options");
+
+	for (i = 0; i < CONF_OPTION_COUNT; i++) {
+		opts[pos].name = conf_options[i].name;
+		opts[pos].has_arg = conf_options[i].value_required == 0 ? no_argument :
+				     conf_options[i].value_required == 1 ? required_argument : optional_argument;
+		opts[pos].flag = NULL;
+		opts[pos].val = conf_options[i].option != 0 ? conf_options[i].option : LONG_OPT_BASE + i;
+		pos++;
+	}
+
+	opts[pos++] = (struct option){ "help", no_argument, NULL, 'h' };
+	opts[pos++] = (struct option){ "version", no_argument, NULL, 'v' };
+	opts[pos++] = (struct option){ "config", required_argument, NULL, 'c' };
+	opts[pos++] = (struct option){ "command", required_argument, NULL, 'x' };
+	opts[pos] = (struct option){ 0, 0, 0, 0 };
+}
+
+static bool config_handle_parsed_option(int c, const char* value)
+{
+	unsigned int idx;
+
+	if (c >= LONG_OPT_BASE) {
+		idx = c - LONG_OPT_BASE;
+		if (idx >= CONF_OPTION_COUNT)
+			return false;
+		return config_handle_option(0, conf_options[idx].name, value);
+	}
+
+	return config_handle_option(c, NULL, value);
+}
+
 static void print_usage(const char* name)
 {
-	printf("\nUsage: %s [-v] [-h] [-q] [-D] [-a] [-c file] [-i interface] [-t sec] [-d ms] [-V view] [-b bytes]\n"
-		"\t\t[-s] [-u] [-N] [-n IP] [-p port] [-o file] [-X[name]] [-x command]\n"
-		"\t\t[][-e MAC] [-f PKT_NAME] [-m MODE] [-B BSSID]\n\n"
-
+	printf("\nUsage: %s [options]\n\n"
 		"General Options: Description (default value)\n"
-		"  -v\t\tshow version\n"
-		"  -h\t\tHelp\n"
-		"  -q\t\tQuiet, no output\n"
+		"  -v, --version\tShow version\n"
+		"  -h, --help\t\tHelp\n"
+		"  -q, --quiet\t\tQuiet, no output\n"
 #if DEBUG
-		"  -D\t\tShow lots of debug output, no UI\n"
+		"  -D, --debug\t\tShow lots of debug output, no UI\n"
 #endif
-		"  -a\t\tAlways add virtual monitor interface\n"
-		"  -c <file>\tConfig file (" CONFIG_FILE ")\n"
-		"  -C <chan>\tSet initial channel\n"
-		"  -i <intf>\tInterface name (wlan0)\n"
-		"  -t <sec>\tNode timeout in seconds (60)\n"
-		"  -d <ms>\tDisplay update interval in ms (100)\n"
-		"  -V view\tDisplay view: history|essid|statistics|spectrum\n"
-		"  -b <bytes>\tReceive buffer size in bytes (not set)\n"
-		"  -M[filename]\tMAC address to host name mapping (/tmp/dhcp.leases)\n"
+		"  -a, --add_monitor\tAlways add virtual monitor interface\n"
+		"  -c, --config <file>\tConfig file (" CONFIG_FILE ")\n"
+		"  -C, --channel <chan>\tSet initial channel\n"
+		"  -i, --interface <intf>\tInterface name (wlan0)\n"
+		"  -T, --duration <sec>\tStop automatically after N seconds (0 = unlimited)\n"
+		"  -t, --node_timeout <sec>\tNode timeout in seconds (60)\n"
+		"  -d, --display_interval <ms>\tDisplay update interval in ms (100)\n"
+		"  -V, --display_view <view>\tDisplay view: history|essid|statistics|spectrum\n"
+		"  -b, --receive_buffer <bytes>\tReceive buffer size in bytes (not set)\n"
+		"  -M[filename], --mac_names[=filename]\tMAC address to host name mapping (/tmp/dhcp.leases)\n"
 
 		"\nFeature Options:\n"
-		"  -s\t\t(Poor mans) Spectrum analyzer mode\n"
-		"  -u\t\tUpper channel limit\n\n"
+		"  -s, --channel_scan\t(Poor man's) spectrum analyzer mode\n"
+		"  -u, --channel_upper <chan>\tUpper channel limit\n\n"
 
-		"  -N\t\tAllow network connection, server mode (off)\n"
-		"  -n <IP>\tConnect to server with <IP>, client mode (off)\n"
-		"  -p <port>\tPort number of server (4444)\n\n"
+		"  -N, --server\t\tAllow network connection, server mode (off)\n"
+		"  -n, --client <IP>\tConnect to server with <IP>, client mode (off)\n"
+		"  -p, --port <port>\tPort number of server (4444)\n\n"
 
-		"  -o <filename>\tWrite packet info into 'filename'\n\n"
+		"  -o, --outfile <filename>\tWrite packet info into filename\n"
+		"      --output-format <csv|jsonl>\tOutput format (csv)\n\n"
 
-		"  -X[filename]\tAllow control socket on 'filename' (/tmp/horst)\n"
-		"  -x <command>\tSend control command\n"
+		"  -X[name], --control_pipe[=name]\tAllow control socket (/tmp/horst)\n"
+		"  -x, --command <command>\tSend control command\n"
 
 		"\nFilter Options:\n"
 		" Filters are generally 'positive' or 'inclusive' which means you define\n"
 		" what you want to see, and everything else is getting filtered out.\n"
 		" If a filter is not set it is inactive and nothing is filtered.\n"
 		" Most filter options can be specified multiple times and will be combined\n"
-		"  -e <MAC>\tSource MAC addresses (xx:xx:xx:xx:xx:xx), up to 9 times\n"
-		"  -f <PKT_NAME>\tFilter packet types, multiple\n"
-		"  -m <MODE>\tOperating mode: AP|STA|ADH|PRB|WDS|UNKNOWN, multiple\n"
-		"  -B <MAC>\tBSSID (xx:xx:xx:xx:xx:xx), only one\n"
+		"  -e, --filter_mac <MAC>\tSource MAC addresses, up to 9 times\n"
+		"  -f, --filter_packet <PKT_NAME>\tFilter packet types, multiple\n"
+		"  -m, --filter_mode <MODE>\tOperating mode: AP|STA|ADH|PRB|WDS|UNKNOWN, multiple\n"
+		"  -B, --filter_bssid <MAC>\tBSSID, only one\n"
+		"      --filter-signal <dBm>\tMinimum RSSI to include, e.g. -75 (0 = disabled)\n"
 		"\n",
 		name);
 }
 
 void config_parse_file_and_cmdline(int argc, char** argv)
 {
-	char getopt_str[(sizeof(conf_options)/sizeof(struct conf_option))*2 + 10];
+	char getopt_str[CONF_OPTION_COUNT * 2 + 10];
+	struct option long_options[CONF_OPTION_COUNT + 5];
 	char* conf_filename = CONFIG_FILE;
 	int c;
 
 	config_get_getopt_string(getopt_str, sizeof(getopt_str), "hvc:x:");
+	config_get_long_options(long_options, sizeof(long_options) / sizeof(long_options[0]));
 
 	/* first: apply default values */
 	config_apply_defaults();
@@ -519,7 +610,7 @@ void config_parse_file_and_cmdline(int argc, char** argv)
 	 * then: handle command line options which are not
 	 * configuration options ("hc:")
 	 */
-	while ((c = getopt(argc, argv, getopt_str)) > 0) {
+	while ((c = getopt_long(argc, argv, getopt_str, long_options, NULL)) > 0) {
 		switch (c) {
 		case 'c':
 			LOG_INF("Using config file '%s'", optarg);
@@ -543,16 +634,15 @@ void config_parse_file_and_cmdline(int argc, char** argv)
 	 * override or add to the config file options
 	 */
 	optind = 1;
-	while ((c = getopt(argc, argv, getopt_str)) > 0) {
-		config_handle_option(c, NULL, optarg);
-	}
+	while ((c = getopt_long(argc, argv, getopt_str, long_options, NULL)) > 0)
+		config_handle_parsed_option(c, optarg);
 
 	/*
 	 * and finally get command line options ("commands") which depend
 	 * on config options ("x:")
 	 */
 	optind = 1;
-	while ((c = getopt(argc, argv, getopt_str)) > 0) {
+	while ((c = getopt_long(argc, argv, getopt_str, long_options, NULL)) > 0) {
 		switch (c) {
 		case 'x':
 			control_send_command(optarg);
