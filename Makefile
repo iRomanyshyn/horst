@@ -23,6 +23,8 @@ DEBUG		= 0
 LIBUWIFI	= libuwifi
 PREFIX		?= /usr/local
 DESTDIR		?= /
+EXTRA_CFLAGS	?=
+EXTRA_LDFLAGS	?=
 
 SRC		+= conf_options.c
 SRC		+= control.c
@@ -44,9 +46,11 @@ SRC		+= protocol_parser.c
 
 LIBS		= -lncurses -lm -luwifi
 LDFLAGS		+= -Wl,-rpath,/usr/local/lib
+LDFLAGS		+= $(EXTRA_LDFLAGS)
 
 INCLUDES	= -I.
 CFLAGS		+= -std=gnu99 -Wall -Wextra -g
+CFLAGS		+= $(EXTRA_CFLAGS)
 CHECK_FLAGS	+= -D__linux__
 
 ifneq ($(LIBUWIFI),)
