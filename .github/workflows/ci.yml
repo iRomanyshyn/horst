@@ -73,6 +73,6 @@ jobs:
       - name: Build with ASan and UBSan
         run: |
           make clean
-          make V=1 DEBUG=1 CC=clang \
+          make V=1 CC=clang \
             EXTRA_CFLAGS='-O1 -fsanitize=address,undefined -fno-omit-frame-pointer' \
             EXTRA_LDFLAGS='-fsanitize=address,undefined'
