@@ -44,6 +44,10 @@ jobs:
   sanitizers:
     name: Sanitizer build
     runs-on: ubuntu-24.04
+    env:
+      CC: clang
+      CFLAGS: -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
+      LDFLAGS: -fsanitize=address,undefined
 
     steps:
       - name: Checkout
@@ -65,6 +69,4 @@ jobs:
       - name: Build with ASan and UBSan
         run: |
           make clean
-          make V=1 DEBUG=1 CC=clang \
-            CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' \
-            LDFLAGS='-fsanitize=address,undefined'
+          make V=1 DEBUG=1
