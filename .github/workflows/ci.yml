@@ -49,6 +49,43 @@ jobs:
           grep -q -- '--filter-signal' /tmp/horst-help.txt
           grep -q -- '--output-format' /tmp/horst-help.txt
 
+          expect_exit_2() {
+            set +e
+            ./build/horst "$@" >/tmp/horst-invalid.txt 2>&1
+            status=$?
+            set -e
+            if [ "$status" -ne 2 ]; then
+              cat /tmp/horst-invalid.txt
+              echo "Expected exit status 2, got $status"
+              exit 1
+            fi
+          }
+
+          expect_exit_2 --quiet --duration nope
+          expect_exit_2 --quiet --filter-signal -201
+          expect_exit_2 --quiet --output-format bogus
+
+      - name: Output initialization smoke tests
+        run: |
+          csv_file=$(mktemp)
+          json_file=$(mktemp)
+
+          # Outfiles are opened after all startup options have been parsed.
+          # The deliberately invalid interface lets the program stop before
+          # capture without requiring monitor-mode hardware in CI.
+          timeout 5s ./build/horst --quiet \
+            --interface horst-ci-no-such-if \
+            --outfile "$csv_file" >/dev/null 2>&1 || true
+          grep -q '^TIME, WLAN TYPE, MAC SRC' "$csv_file"
+
+          # Put --output-format after --outfile to verify option ordering does
+          # not accidentally emit a CSV header into a JSONL file.
+          timeout 5s ./build/horst --quiet \
+            --interface horst-ci-no-such-if \
+            --outfile "$json_file" \
+            --output-format jsonl >/dev/null 2>&1 || true
+          test ! -s "$json_file"
+
   sanitizers:
     name: Sanitizer build
     runs-on: ubuntu-24.04

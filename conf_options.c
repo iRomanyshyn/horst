@@ -45,6 +45,11 @@ struct conf_option {
 #define CONF_OPTION_COUNT (sizeof(conf_options) / sizeof(struct conf_option))
 #define LONG_OPT_BASE 1000
 
+/* Startup configuration is applied in several passes. Keep output files closed
+ * until all config-file and command-line overrides are known, so output format
+ * and outfile are independent of option ordering. */
+static bool parsing_initial_config;
+
 static bool conf_quiet(__attribute__((unused)) const char* value) {
 	conf.quiet = 1;
 	return true;
@@ -73,25 +78,58 @@ static bool conf_add_monitor(const char* value) {
 }
 
 static bool conf_outfile(const char* value) {
-	dumpfile_open(value);
+	if (!parsing_initial_config) {
+		dumpfile_open(value);
+		return true;
+	}
+
+	if (value == NULL || value[0] == '\0') {
+		conf.dumpfile[0] = '\0';
+		return true;
+	}
+
+	strncpy(conf.dumpfile, value, MAX_CONF_VALUE_STRLEN);
+	conf.dumpfile[MAX_CONF_VALUE_STRLEN] = '\0';
 	return true;
 }
 
 static bool conf_output_format(const char* value) {
+	enum output_format new_format;
+
+	if (value == NULL) {
+		LOG_ERR("Output format requires a value (csv or jsonl)");
+		return false;
+	}
+
 	if (strcasecmp(value, "csv") == 0)
-		conf.output_format = OUTPUT_FORMAT_CSV;
+		new_format = OUTPUT_FORMAT_CSV;
 	else if (strcasecmp(value, "jsonl") == 0 || strcasecmp(value, "ndjson") == 0)
-		conf.output_format = OUTPUT_FORMAT_JSONL;
+		new_format = OUTPUT_FORMAT_JSONL;
 	else {
 		LOG_ERR("Unknown output format '%s' (expected csv or jsonl)", value);
 		return false;
 	}
+
+	/* A live control command must not append records in a different format to
+	 * an already-open dump. Close it first with `outfile=` and then switch. */
+	if (!parsing_initial_config && conf.dumpfile[0] != '\0' &&
+	    new_format != conf.output_format) {
+		LOG_ERR("Cannot change output format while an outfile is open; close it with 'outfile=' first");
+		return false;
+	}
+
+	conf.output_format = new_format;
 	return true;
 }
 
 static bool conf_duration(const char* value) {
 	char* end = NULL;
 	unsigned long duration;
+
+	if (value == NULL) {
+		LOG_ERR("Duration requires a value");
+		return false;
+	}
 
 	errno = 0;
 	duration = strtoul(value, &end, 10);
@@ -106,6 +144,11 @@ static bool conf_duration(const char* value) {
 static bool conf_filter_signal(const char* value) {
 	char* end = NULL;
 	long signal;
+
+	if (value == NULL) {
+		LOG_ERR("Signal threshold requires a value");
+		return false;
+	}
 
 	errno = 0;
 	signal = strtol(value, &end, 10);
@@ -414,7 +457,8 @@ bool config_handle_option(int c, const char* name, const char* value)
 				/* split list values and call function multiple times */
 				while ((end = strchr(value, ',')) != NULL) {
 					*end = '\0';
-					conf_options[i].func(value);
+					if (!conf_options[i].func(value))
+						return false;
 					value = end + 1;
 				}
 			}
@@ -603,6 +647,8 @@ void config_parse_file_and_cmdline(int argc, char** argv)
 	config_get_getopt_string(getopt_str, sizeof(getopt_str), "hvc:x:");
 	config_get_long_options(long_options, sizeof(long_options) / sizeof(long_options[0]));
 
+	parsing_initial_config = true;
+
 	/* first: apply default values */
 	config_apply_defaults();
 
@@ -620,9 +666,11 @@ void config_parse_file_and_cmdline(int argc, char** argv)
 			printf("%s using libuwifi %s\n", VERSION, UWIFI_VERSION);
 			exit(0);
 		case 'h':
-		case '?':
 			print_usage(argv[0]);
 			exit(0);
+		case '?':
+			print_usage(argv[0]);
+			exit(2);
 		}
 	}
 
@@ -634,8 +682,24 @@ void config_parse_file_and_cmdline(int argc, char** argv)
 	 * override or add to the config file options
 	 */
 	optind = 1;
-	while ((c = getopt_long(argc, argv, getopt_str, long_options, NULL)) > 0)
-		config_handle_parsed_option(c, optarg);
+	while ((c = getopt_long(argc, argv, getopt_str, long_options, NULL)) > 0) {
+		switch (c) {
+		case 'c':
+		case 'v':
+		case 'h':
+		case 'x':
+		case '?':
+			break;
+		default:
+			if (!config_handle_parsed_option(c, optarg))
+				errx(2, "Invalid command line option value");
+			break;
+		}
+	}
+
+	parsing_initial_config = false;
+	if (conf.dumpfile[0] != '\0')
+		dumpfile_open(conf.dumpfile);
 
 	/*
 	 * and finally get command line options ("commands") which depend

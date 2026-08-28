@@ -231,6 +231,44 @@ static void write_ipv4(FILE* out, unsigned int ip)
 	fprintf(out, "%u.%u.%u.%u", bytes[0], bytes[1], bytes[2], bytes[3]);
 }
 
+static bool utf8_continuation(unsigned char c)
+{
+	return (c & 0xc0) == 0x80;
+}
+
+/* Return the length of a valid UTF-8 sequence beginning at s, or 0 if the
+ * next bytes are not a canonical UTF-8 sequence. */
+static size_t utf8_sequence_length(const unsigned char* s, size_t remaining)
+{
+	unsigned char c = s[0];
+
+	if (remaining >= 2 && c >= 0xc2 && c <= 0xdf &&
+	    utf8_continuation(s[1]))
+		return 2;
+
+	if (remaining >= 3 && utf8_continuation(s[2])) {
+		if (c == 0xe0 && s[1] >= 0xa0 && s[1] <= 0xbf)
+			return 3;
+		if (((c >= 0xe1 && c <= 0xec) || (c >= 0xee && c <= 0xef)) &&
+		    utf8_continuation(s[1]))
+			return 3;
+		if (c == 0xed && s[1] >= 0x80 && s[1] <= 0x9f)
+			return 3;
+	}
+
+	if (remaining >= 4 && utf8_continuation(s[2]) &&
+	    utf8_continuation(s[3])) {
+		if (c == 0xf0 && s[1] >= 0x90 && s[1] <= 0xbf)
+			return 4;
+		if (c >= 0xf1 && c <= 0xf3 && utf8_continuation(s[1]))
+			return 4;
+		if (c == 0xf4 && s[1] >= 0x80 && s[1] <= 0x8f)
+			return 4;
+	}
+
+	return 0;
+}
+
 static void write_json_string(FILE* out, const char* str, size_t maxlen)
 {
 	size_t i;
@@ -238,6 +276,8 @@ static void write_json_string(FILE* out, const char* str, size_t maxlen)
 	fputc('"', out);
 	for (i = 0; i < maxlen && str[i] != '\0'; i++) {
 		unsigned char c = (unsigned char)str[i];
+		size_t utf8_len;
+
 		switch (c) {
 		case '"':
 			fputs("\\\"", out);
@@ -261,10 +301,22 @@ static void write_json_string(FILE* out, const char* str, size_t maxlen)
 			fputs("\\t", out);
 			break;
 		default:
-			if (c < 0x20 || c >= 0x7f)
+			if (c < 0x20 || c == 0x7f) {
 				fprintf(out, "\\u%04x", c);
-			else
+			} else if (c < 0x80) {
 				fputc(c, out);
+			} else {
+				utf8_len = utf8_sequence_length(
+					(const unsigned char*)&str[i], maxlen - i);
+				if (utf8_len > 0) {
+					fwrite(&str[i], 1, utf8_len, out);
+					i += utf8_len - 1;
+				} else {
+					/* SSIDs are byte strings and may contain malformed UTF-8.
+					 * Escape an invalid byte so the JSON itself stays valid. */
+					fprintf(out, "\\u%04x", c);
+				}
+			}
 			break;
 		}
 	}
@@ -505,7 +557,39 @@ static void local_receive_packet(int fd, unsigned char* buffer, size_t bufsize)
 	handle_packet(&p);
 }
 
-static void receive_any(const sigset_t *const waitmask)
+static bool timespec_reached(const struct timespec* now,
+			     const struct timespec* deadline)
+{
+	return now->tv_sec > deadline->tv_sec ||
+	       (now->tv_sec == deadline->tv_sec && now->tv_nsec >= deadline->tv_nsec);
+}
+
+static uint32_t timespec_remaining_usecs(const struct timespec* deadline)
+{
+	struct timespec now;
+	time_t sec;
+	long nsec;
+	uint64_t usecs;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	if (timespec_reached(&now, deadline))
+		return 0;
+
+	sec = deadline->tv_sec - now.tv_sec;
+	nsec = deadline->tv_nsec - now.tv_nsec;
+	if (nsec < 0) {
+		sec--;
+		nsec += 1000000000L;
+	}
+
+	usecs = (uint64_t)sec * 1000000ULL + (uint64_t)(nsec + 999) / 1000ULL;
+	if (usecs > UINT32_MAX)
+		return UINT32_MAX;
+	return (uint32_t)usecs;
+}
+
+static void receive_any(const sigset_t *const waitmask,
+			const struct timespec* capture_deadline)
 {
 	int ret, mfd;
 	uint32_t usecs = UINT32_MAX;
@@ -525,6 +609,11 @@ static void receive_any(const sigset_t *const waitmask)
 		FD_SET(ctlpipe, &read_fds);
 
 	usecs = MIN(uwifi_channel_get_remaining_dwell_time(&conf.intf), 1000000);
+	if (capture_deadline != NULL)
+		usecs = MIN(usecs, timespec_remaining_usecs(capture_deadline));
+	if (usecs == 0)
+		return;
+
 	ts.tv_sec = usecs / 1000000;
 	ts.tv_nsec = usecs % 1000000 * 1000;
 	mfd = MAX(conf.intf.sock, srv_fd);
@@ -714,6 +803,7 @@ int main(int argc, char** argv)
 	struct sigaction sigint_action;
 	struct sigaction sigpipe_action;
 	struct timespec capture_started;
+	struct timespec capture_deadline;
 
 	cc_list_head_init(&essids);
 	init_spectrum();
@@ -789,6 +879,9 @@ int main(int argc, char** argv)
 		net_init_server_socket(conf.port);
 
 	clock_gettime(CLOCK_MONOTONIC, &capture_started);
+	capture_deadline = capture_started;
+	if (conf.duration > 0)
+		capture_deadline.tv_sec += (time_t)conf.duration;
 
 	/* Race-free signal handling:
 	 *   1. block all handled signals while working (with workmask)
@@ -804,7 +897,8 @@ int main(int argc, char** argv)
 
 	while (!conf.intf.channel_scan || conf.intf.channel_scan_rounds != 0)
 	{
-		receive_any(&waitmask);
+		receive_any(&waitmask,
+			    conf.duration > 0 ? &capture_deadline : NULL);
 
 		if (is_sigint_caught)
 			exit(2);
@@ -812,8 +906,7 @@ int main(int argc, char** argv)
 		clock_gettime(CLOCK_MONOTONIC, &time_mono);
 		clock_gettime(CLOCK_REALTIME, &time_real);
 
-		if (conf.duration > 0 &&
-		    time_mono.tv_sec >= capture_started.tv_sec + (time_t)conf.duration)
+		if (conf.duration > 0 && timespec_reached(&time_mono, &capture_deadline))
 			break;
 
 		uwifi_nodes_timeout(&conf.intf.wlan_nodes, conf.node_timeout,
@@ -864,6 +957,15 @@ void main_reset(void)
 
 void dumpfile_open(const char* name)
 {
+	char filename[MAX_CONF_VALUE_STRLEN + 1];
+
+	if (name != NULL && name[0] != '\0') {
+		strncpy(filename, name, MAX_CONF_VALUE_STRLEN);
+		filename[MAX_CONF_VALUE_STRLEN] = '\0';
+	} else {
+		filename[0] = '\0';
+	}
+
 	if (DF != NULL) {
 		fclose(DF);
 		DF = NULL;
@@ -871,17 +973,23 @@ void dumpfile_open(const char* name)
 
 	dump_header_written = false;
 
-	if (name == NULL || strlen(name) == 0) {
+	if (filename[0] == '\0') {
 		LOG_INF("- Not writing outfile");
 		conf.dumpfile[0] = '\0';
 		return;
 	}
 
-	strncpy(conf.dumpfile, name, MAX_CONF_VALUE_STRLEN);
+	strncpy(conf.dumpfile, filename, MAX_CONF_VALUE_STRLEN);
 	conf.dumpfile[MAX_CONF_VALUE_STRLEN] = '\0';
 	DF = fopen(conf.dumpfile, "w");
 	if (DF == NULL)
 		err(1, "Couldn't open dump file");
+
+	if (conf.output_format == OUTPUT_FORMAT_CSV) {
+		write_csv_header();
+		dump_header_written = true;
+		fflush(DF);
+	}
 
 	LOG_INF("- Writing to outfile %s", conf.dumpfile);
 }
