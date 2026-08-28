@@ -112,7 +112,7 @@ void update_filter_win(WINDOW *win)
 	mvwprintw(win, l++, MODE_COL, "!: [%c] Access Point", CHECKED(conf.filter_mode & WLAN_MODE_AP));
 	mvwprintw(win, l++, MODE_COL, "@: [%c] Station", CHECKED(conf.filter_mode & WLAN_MODE_STA));
 	mvwprintw(win, l++, MODE_COL, "#: [%c] IBSS (Ad-hoc)", CHECKED(conf.filter_mode & WLAN_MODE_IBSS));
-	mvwprintw(win, l++, MODE_COL, "%: [%c] WDS/4ADDR", CHECKED(conf.filter_mode & WLAN_MODE_4ADDR));
+	mvwprintw(win, l++, MODE_COL, "%%: [%c] WDS/4ADDR", CHECKED(conf.filter_mode & WLAN_MODE_4ADDR));
 	mvwprintw(win, l++, MODE_COL, "^: [%c] Unknown", CHECKED(conf.filter_mode & WLAN_MODE_UNKNOWN));
 
 	wattroff(win, WHITE);

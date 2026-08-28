@@ -61,6 +61,7 @@ struct timespec time_mono;
 struct timespec time_real;
 
 static FILE* DF = NULL;
+static bool dump_header_written;
 
 /* receive packet buffer
  *
@@ -182,6 +183,8 @@ static void update_spectrum(struct uwifi_packet* p, struct uwifi_node* n)
 	if (cn->node != n) {
 		LOG_DBG("SPEC node adding %p", n);
 		cn = malloc(sizeof(struct chan_node));
+		if (cn == NULL)
+			return;
 		cn->node = n;
 		cn->chan = chan;
 		ewma_init(&cn->sig_avg, 1024, 8);
@@ -209,29 +212,203 @@ void update_spectrum_durations(void)
 	}
 }
 
-static void write_to_file(struct uwifi_packet* p)
+static void format_timestamp(char* buf, size_t buflen)
 {
-	char buf[40];
-	int i;
-	struct tm* ltm = localtime(&time_real.tv_sec);
+	char date[32];
+	char zone[8];
+	struct tm ltm;
 
-	//timestamp, e.g. 2015-05-16 15:05:44.338806 +0300
-	i = strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", ltm);
-	i += snprintf(buf + i, sizeof(buf) - i, ".%06ld", (long)(time_real.tv_nsec / 1000));
-	i += strftime(buf + i, sizeof(buf) - i, " %z", ltm);
-	fprintf(DF, "%s, ", buf);
+	localtime_r(&time_real.tv_sec, &ltm);
+	strftime(date, sizeof(date), "%Y-%m-%dT%H:%M:%S", &ltm);
+	strftime(zone, sizeof(zone), "%z", &ltm);
+	snprintf(buf, buflen, "%s.%06ld%s", date,
+		 (long)(time_real.tv_nsec / 1000), zone);
+}
 
-	fprintf(DF, "%s, " MAC_FMT ", ",
+static void write_ipv4(FILE* out, unsigned int ip)
+{
+	const unsigned char* bytes = (const unsigned char*)&ip;
+	fprintf(out, "%u.%u.%u.%u", bytes[0], bytes[1], bytes[2], bytes[3]);
+}
+
+static bool utf8_continuation(unsigned char c)
+{
+	return (c & 0xc0) == 0x80;
+}
+
+/* Return the length of a valid UTF-8 sequence beginning at s, or 0 if the
+ * next bytes are not a canonical UTF-8 sequence. */
+static size_t utf8_sequence_length(const unsigned char* s, size_t remaining)
+{
+	unsigned char c = s[0];
+
+	if (remaining >= 2 && c >= 0xc2 && c <= 0xdf &&
+	    utf8_continuation(s[1]))
+		return 2;
+
+	if (remaining >= 3 && utf8_continuation(s[2])) {
+		if (c == 0xe0 && s[1] >= 0xa0 && s[1] <= 0xbf)
+			return 3;
+		if (((c >= 0xe1 && c <= 0xec) || (c >= 0xee && c <= 0xef)) &&
+		    utf8_continuation(s[1]))
+			return 3;
+		if (c == 0xed && s[1] >= 0x80 && s[1] <= 0x9f)
+			return 3;
+	}
+
+	if (remaining >= 4 && utf8_continuation(s[2]) &&
+	    utf8_continuation(s[3])) {
+		if (c == 0xf0 && s[1] >= 0x90 && s[1] <= 0xbf)
+			return 4;
+		if (c >= 0xf1 && c <= 0xf3 && utf8_continuation(s[1]))
+			return 4;
+		if (c == 0xf4 && s[1] >= 0x80 && s[1] <= 0x8f)
+			return 4;
+	}
+
+	return 0;
+}
+
+static void write_json_string(FILE* out, const char* str, size_t maxlen)
+{
+	size_t i;
+
+	fputc('"', out);
+	for (i = 0; i < maxlen && str[i] != '\0'; i++) {
+		unsigned char c = (unsigned char)str[i];
+		size_t utf8_len;
+
+		switch (c) {
+		case '"':
+			fputs("\\\"", out);
+			break;
+		case '\\':
+			fputs("\\\\", out);
+			break;
+		case '\b':
+			fputs("\\b", out);
+			break;
+		case '\f':
+			fputs("\\f", out);
+			break;
+		case '\n':
+			fputs("\\n", out);
+			break;
+		case '\r':
+			fputs("\\r", out);
+			break;
+		case '\t':
+			fputs("\\t", out);
+			break;
+		default:
+			if (c < 0x20 || c == 0x7f) {
+				fprintf(out, "\\u%04x", c);
+			} else if (c < 0x80) {
+				fputc(c, out);
+			} else {
+				utf8_len = utf8_sequence_length(
+					(const unsigned char*)&str[i], maxlen - i);
+				if (utf8_len > 0) {
+					fwrite(&str[i], 1, utf8_len, out);
+					i += utf8_len - 1;
+				} else {
+					/* SSIDs are byte strings and may contain malformed UTF-8.
+					 * Escape an invalid byte so the JSON itself stays valid. */
+					fprintf(out, "\\u%04x", c);
+				}
+			}
+			break;
+		}
+	}
+	fputc('"', out);
+}
+
+static void write_csv_string(FILE* out, const char* str, size_t maxlen)
+{
+	size_t i;
+
+	fputc('"', out);
+	for (i = 0; i < maxlen && str[i] != '\0'; i++) {
+		if (str[i] == '"')
+			fputc('"', out);
+		fputc(str[i], out);
+	}
+	fputc('"', out);
+}
+
+static void write_csv_header(void)
+{
+	fprintf(DF, "TIME, WLAN TYPE, MAC SRC, MAC DST, BSSID, PACKET TYPES, SIGNAL, ");
+	fprintf(DF, "LENGTH, PHY RATE, FREQUENCY, TSF, ESSID, MODE, CHANNEL, ");
+	fprintf(DF, "WEP, WPA1, RSN (WPA2), IP SRC, IP DST\n");
+}
+
+static void write_csv_packet(struct uwifi_packet* p)
+{
+	char timestamp[48];
+
+	format_timestamp(timestamp, sizeof(timestamp));
+	fprintf(DF, "%s, %s, " MAC_FMT ", ", timestamp,
 		wlan_get_packet_type_name(p->wlan_type), MAC_PAR(p->wlan_ta));
 	fprintf(DF, MAC_FMT ", ", MAC_PAR(p->wlan_ra));
 	fprintf(DF, MAC_FMT ", ", MAC_PAR(p->wlan_bssid));
 	fprintf(DF, "%x, %d, %d, %d, %d, ",
 		p->pkt_types, p->phy_signal, p->wlan_len, p->phy_rate, p->phy_freq);
 	fprintf(DF, "%016llx, ", (unsigned long long)p->wlan_tsf);
-	fprintf(DF, "%s, %d, %d, %d, %d, %d, ",
-		p->wlan_essid, p->wlan_mode, p->wlan_channel,
-		p->wlan_wep, p->wlan_wpa, p->wlan_rsn);
-	fprintf(DF, "%s, %s\n", ip_sprintf(p->ip_src), ip_sprintf(p->ip_dst));
+	write_csv_string(DF, p->wlan_essid, WLAN_MAX_SSID_LEN);
+	fprintf(DF, ", %d, %d, %d, %d, %d, ",
+		p->wlan_mode, p->wlan_channel, p->wlan_wep, p->wlan_wpa, p->wlan_rsn);
+	write_ipv4(DF, p->ip_src);
+	fputs(", ", DF);
+	write_ipv4(DF, p->ip_dst);
+	fputc('\n', DF);
+}
+
+static void write_jsonl_packet(struct uwifi_packet* p)
+{
+	char timestamp[48];
+
+	format_timestamp(timestamp, sizeof(timestamp));
+	fputs("{\"time\":", DF);
+	write_json_string(DF, timestamp, sizeof(timestamp));
+	fputs(",\"wlan_type\":", DF);
+	write_json_string(DF, wlan_get_packet_type_name(p->wlan_type), 64);
+	fprintf(DF, ",\"ta\":\"" MAC_FMT "\"", MAC_PAR(p->wlan_ta));
+	fprintf(DF, ",\"ra\":\"" MAC_FMT "\"", MAC_PAR(p->wlan_ra));
+	fprintf(DF, ",\"bssid\":\"" MAC_FMT "\"", MAC_PAR(p->wlan_bssid));
+	fprintf(DF, ",\"packet_types\":%u", p->pkt_types);
+	fprintf(DF, ",\"signal_dbm\":%d", p->phy_signal);
+	fprintf(DF, ",\"length\":%u", p->wlan_len);
+	fprintf(DF, ",\"phy_rate_mbps\":%.1f", p->phy_rate / 10.0);
+	fprintf(DF, ",\"frequency_mhz\":%u", p->phy_freq);
+	fprintf(DF, ",\"tsf\":\"%016llx\"", (unsigned long long)p->wlan_tsf);
+	fputs(",\"essid\":", DF);
+	write_json_string(DF, p->wlan_essid, WLAN_MAX_SSID_LEN);
+	fprintf(DF, ",\"mode\":%u", p->wlan_mode);
+	fprintf(DF, ",\"channel\":%u", p->wlan_channel);
+	fprintf(DF, ",\"wep\":%s", p->wlan_wep ? "true" : "false");
+	fprintf(DF, ",\"wpa1\":%s", p->wlan_wpa ? "true" : "false");
+	fprintf(DF, ",\"rsn\":%s", p->wlan_rsn ? "true" : "false");
+	fprintf(DF, ",\"retry\":%s", p->wlan_retry ? "true" : "false");
+	fprintf(DF, ",\"bad_fcs\":%s", (p->phy_flags & PHY_FLAG_BADFCS) ? "true" : "false");
+	fputs(",\"ip_src\":\"", DF);
+	write_ipv4(DF, p->ip_src);
+	fputs("\",\"ip_dst\":\"", DF);
+	write_ipv4(DF, p->ip_dst);
+	fputs("\"}\n", DF);
+}
+
+static void write_to_file(struct uwifi_packet* p)
+{
+	if (conf.output_format == OUTPUT_FORMAT_JSONL) {
+		write_jsonl_packet(p);
+	} else {
+		if (!dump_header_written) {
+			write_csv_header();
+			dump_header_written = true;
+		}
+		write_csv_packet(p);
+	}
 	fflush(DF);
 }
 
@@ -242,6 +419,13 @@ static bool filter_packet(struct uwifi_packet* p)
 
 	if (conf.filter_off)
 		return false;
+
+	/* RSSI comes from radiotap and can still be useful for bad-FCS frames. */
+	if (conf.filter_signal != 0 &&
+	    (p->phy_signal == 0 || p->phy_signal < conf.filter_signal)) {
+		stats.filtered_packets++;
+		return true;
+	}
 
 	/* if packets with bad FCS are not filtered, still we can not trust any
 	 * other header, so in any case return */
@@ -373,7 +557,39 @@ static void local_receive_packet(int fd, unsigned char* buffer, size_t bufsize)
 	handle_packet(&p);
 }
 
-static void receive_any(const sigset_t *const waitmask)
+static bool timespec_reached(const struct timespec* now,
+			     const struct timespec* deadline)
+{
+	return now->tv_sec > deadline->tv_sec ||
+	       (now->tv_sec == deadline->tv_sec && now->tv_nsec >= deadline->tv_nsec);
+}
+
+static uint32_t timespec_remaining_usecs(const struct timespec* deadline)
+{
+	struct timespec now;
+	time_t sec;
+	long nsec;
+	uint64_t usecs;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	if (timespec_reached(&now, deadline))
+		return 0;
+
+	sec = deadline->tv_sec - now.tv_sec;
+	nsec = deadline->tv_nsec - now.tv_nsec;
+	if (nsec < 0) {
+		sec--;
+		nsec += 1000000000L;
+	}
+
+	usecs = (uint64_t)sec * 1000000ULL + (uint64_t)(nsec + 999) / 1000ULL;
+	if (usecs > UINT32_MAX)
+		return UINT32_MAX;
+	return (uint32_t)usecs;
+}
+
+static void receive_any(const sigset_t *const waitmask,
+			const struct timespec* capture_deadline)
 {
 	int ret, mfd;
 	uint32_t usecs = UINT32_MAX;
@@ -393,6 +609,11 @@ static void receive_any(const sigset_t *const waitmask)
 		FD_SET(ctlpipe, &read_fds);
 
 	usecs = MIN(uwifi_channel_get_remaining_dwell_time(&conf.intf), 1000000);
+	if (capture_deadline != NULL)
+		usecs = MIN(usecs, timespec_remaining_usecs(capture_deadline));
+	if (usecs == 0)
+		return;
+
 	ts.tv_sec = usecs / 1000000;
 	ts.tv_nsec = usecs % 1000000 * 1000;
 	mfd = MAX(conf.intf.sock, srv_fd);
@@ -523,6 +744,11 @@ static void mac_name_file_read(const char* filename)
 		if (n < 2) // if not MAC name
 			n = sscanf(line, "%17s %17s", macs, name);
 		if (n == 2) {
+			if (idx >= MAX_NODE_NAMES) {
+				LOG_ERR("MAC name file has more than %d entries; ignoring the rest",
+					MAX_NODE_NAMES);
+				break;
+			}
 			convert_string_to_mac(macs, node_names.entry[idx].mac);
 			strncpy(node_names.entry[idx].name, name, MAX_NODE_NAME_STRLEN);
 			node_names.entry[idx].name[MAX_NODE_NAME_STRLEN] = '\0';
@@ -576,6 +802,8 @@ int main(int argc, char** argv)
 	sigset_t waitmask;
 	struct sigaction sigint_action;
 	struct sigaction sigpipe_action;
+	struct timespec capture_started;
+	struct timespec capture_deadline;
 
 	cc_list_head_init(&essids);
 	init_spectrum();
@@ -590,6 +818,8 @@ int main(int argc, char** argv)
 	sigaction(SIGHUP, &sigint_action, NULL);
 
 	sigpipe_action.sa_handler = sigpipe_handler;
+	sigemptyset(&sigpipe_action.sa_mask);
+	sigpipe_action.sa_flags = 0;
 	sigaction(SIGPIPE, &sigpipe_action, NULL);
 
 	atexit(exit_handler);
@@ -633,23 +863,25 @@ int main(int argc, char** argv)
 			 * normally. The interface will be deleted at exit. */
 		}
 
-		printf("SURVEY\n");
-		struct survey_info sinf[10];
-		ifctrl_iwget_survey(conf.intf.ifname, sinf, 10);
-
 		uwifi_init(&conf.intf);
 
 		if (conf.recv_buffer_size)
 			socket_set_receive_buffer(conf.intf.sock, conf.recv_buffer_size);
 	}
 
-	printf("Max PHY rate: %d Mbps\n", conf.intf.max_phy_rate/10);
+	if (!conf.quiet)
+		printf("Max PHY rate: %d Mbps\n", conf.intf.max_phy_rate/10);
 
 	if (!conf.quiet && !conf.debug)
 		init_display();
 
 	if (conf.serveraddr[0] == '\0' && conf.port && conf.allow_client)
 		net_init_server_socket(conf.port);
+
+	clock_gettime(CLOCK_MONOTONIC, &capture_started);
+	capture_deadline = capture_started;
+	if (conf.duration > 0)
+		capture_deadline.tv_sec += (time_t)conf.duration;
 
 	/* Race-free signal handling:
 	 *   1. block all handled signals while working (with workmask)
@@ -665,13 +897,18 @@ int main(int argc, char** argv)
 
 	while (!conf.intf.channel_scan || conf.intf.channel_scan_rounds != 0)
 	{
-		receive_any(&waitmask);
+		receive_any(&waitmask,
+			    conf.duration > 0 ? &capture_deadline : NULL);
 
 		if (is_sigint_caught)
 			exit(2);
 
 		clock_gettime(CLOCK_MONOTONIC, &time_mono);
 		clock_gettime(CLOCK_REALTIME, &time_real);
+
+		if (conf.duration > 0 && timespec_reached(&time_mono, &capture_deadline))
+			break;
+
 		uwifi_nodes_timeout(&conf.intf.wlan_nodes, conf.node_timeout,
 				    &conf.intf.last_nodetimeout);
 
@@ -690,7 +927,8 @@ int main(int argc, char** argv)
 				LOG_ERR("Channel change failed. Disabling scan on '%s'",
 					 conf.intf.ifname);
 				conf.intf.channel_scan = false;
-				update_display(NULL);
+				if (!conf.quiet && !conf.debug)
+					update_display(NULL);
 			}
 		}
 	}
@@ -719,68 +957,39 @@ void main_reset(void)
 
 void dumpfile_open(const char* name)
 {
+	char filename[MAX_CONF_VALUE_STRLEN + 1];
+
+	if (name != NULL && name[0] != '\0') {
+		strncpy(filename, name, MAX_CONF_VALUE_STRLEN);
+		filename[MAX_CONF_VALUE_STRLEN] = '\0';
+	} else {
+		filename[0] = '\0';
+	}
+
 	if (DF != NULL) {
 		fclose(DF);
 		DF = NULL;
 	}
 
-	if (name == NULL || strlen(name) == 0) {
+	dump_header_written = false;
+
+	if (filename[0] == '\0') {
 		LOG_INF("- Not writing outfile");
 		conf.dumpfile[0] = '\0';
 		return;
 	}
 
-	strncpy(conf.dumpfile, name, MAX_CONF_VALUE_STRLEN);
+	strncpy(conf.dumpfile, filename, MAX_CONF_VALUE_STRLEN);
 	conf.dumpfile[MAX_CONF_VALUE_STRLEN] = '\0';
 	DF = fopen(conf.dumpfile, "w");
 	if (DF == NULL)
 		err(1, "Couldn't open dump file");
 
-	fprintf(DF, "TIME, WLAN TYPE, MAC SRC, MAC DST, BSSID, PACKET TYPES, SIGNAL, ");
-	fprintf(DF, "LENGTH, PHY RATE, FREQUENCY, TSF, ESSID, MODE, CHANNEL, ");
-	fprintf(DF, "WEP, WPA1, RSN (WPA2), IP SRC, IP DST\n");
+	if (conf.output_format == OUTPUT_FORMAT_CSV) {
+		write_csv_header();
+		dump_header_written = true;
+		fflush(DF);
+	}
 
 	LOG_INF("- Writing to outfile %s", conf.dumpfile);
 }
-
-
-#if 0
-void print_rate_duration_table(void)
-{
-	int i;
-
-	printf("LEN\t1M l\t1M s\t2M l\t2M s\t5.5M l\t5.5M s\t11M l\t11M s\t");
-	printf("6M\t9\t12M\t18M\t24M\t36M\t48M\t54M\n");
-	for (i=10; i<=2304; i+=10) {
-		printf("%d:\t%d\t%d\t", i,
-			ieee80211_frame_duration(PHY_FLAG_G, i, 10, 0, 0, IEEE80211_FTYPE_DATA, 0, 0),
-			ieee80211_frame_duration(PHY_FLAG_G, i, 10, 1, 0, IEEE80211_FTYPE_DATA, 0, 0));
-		printf("%d\t%d\t",
-			ieee80211_frame_duration(PHY_FLAG_G, i, 20, 0, 0, IEEE80211_FTYPE_DATA, 0, 0),
-			ieee80211_frame_duration(PHY_FLAG_G, i, 20, 1, 0, IEEE80211_FTYPE_DATA, 0, 0));
-		printf("%d\t%d\t",
-			ieee80211_frame_duration(PHY_FLAG_G, i, 55, 0, 0, IEEE80211_FTYPE_DATA, 0, 0),
-			ieee80211_frame_duration(PHY_FLAG_G, i, 55, 1, 0, IEEE80211_FTYPE_DATA, 0, 0));
-		printf("%d\t%d\t",
-			ieee80211_frame_duration(PHY_FLAG_G, i, 110, 0, 0, IEEE80211_FTYPE_DATA, 0, 0),
-			ieee80211_frame_duration(PHY_FLAG_G, i, 110, 1, 0, IEEE80211_FTYPE_DATA, 0, 0));
-
-		printf("%d\t",
-			ieee80211_frame_duration(PHY_FLAG_G, i, 60, 1, 0, IEEE80211_FTYPE_DATA, 0, 0));
-		printf("%d\t",
-			ieee80211_frame_duration(PHY_FLAG_G, i, 90, 1, 0, IEEE80211_FTYPE_DATA, 0, 0));
-		printf("%d\t",
-			ieee80211_frame_duration(PHY_FLAG_G, i, 120, 1, 0, IEEE80211_FTYPE_DATA, 0, 0)),
-		printf("%d\t",
-			ieee80211_frame_duration(PHY_FLAG_G, i, 180, 1, 0, IEEE80211_FTYPE_DATA, 0, 0)),
-		printf("%d\t",
-			ieee80211_frame_duration(PHY_FLAG_G, i, 240, 1, 0, IEEE80211_FTYPE_DATA, 0, 0)),
-		printf("%d\t",
-			ieee80211_frame_duration(PHY_FLAG_G, i, 360, 1, 0, IEEE80211_FTYPE_DATA, 0, 0));
-		printf("%d\t",
-			ieee80211_frame_duration(PHY_FLAG_G, i, 480, 1, 0, IEEE80211_FTYPE_DATA, 0, 0)),
-		printf("%d\n",
-			ieee80211_frame_duration(PHY_FLAG_G, i, 540, 1, 0, IEEE80211_FTYPE_DATA, 0, 0));
-	}
-}
-#endif

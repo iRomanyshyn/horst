@@ -72,7 +72,7 @@ void update_essid_win(WINDOW *win)
 				wlan_mode_string(n->wlan_mode),
 				mac_name_lookup(n->wlan_src, 0));
 			wprintw(win, " " MAC_FMT, MAC_PAR(n->wlan_bssid));
-			wprintw(win, " %016llx", n->wlan_tsf);
+			wprintw(win, " %016llx", (unsigned long long)n->wlan_tsf);
 			wprintw(win, " (%d)", n->wlan_bintval);
 			if (n->wlan_bintval < 1000)
 				wprintw(win, " ");

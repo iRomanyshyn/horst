@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - 'resurrect-*'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            libncurses-dev \
+            libnl-3-dev \
+            libnl-genl-3-dev \
+            pkg-config
+
+      - name: Build
+        env:
+          CC: ${{ matrix.compiler }}
+        run: make V=1
+
+      - name: CLI smoke tests
+        run: |
+          ./build/horst --version
+          ./build/horst --help > /tmp/horst-help.txt
+          grep -q -- '--duration' /tmp/horst-help.txt
+          grep -q -- '--filter-signal' /tmp/horst-help.txt
+          grep -q -- '--output-format' /tmp/horst-help.txt
+
+          expect_exit_2() {
+            set +e
+            ./build/horst "$@" >/tmp/horst-invalid.txt 2>&1
+            status=$?
+            set -e
+            if [ "$status" -ne 2 ]; then
+              cat /tmp/horst-invalid.txt
+              echo "Expected exit status 2, got $status"
+              exit 1
+            fi
+          }
+
+          expect_exit_2 --quiet --duration nope
+          expect_exit_2 --quiet --filter-signal -201
+          expect_exit_2 --quiet --output-format bogus
+
+      - name: Output initialization smoke tests
+        run: |
+          csv_file=$(mktemp)
+          json_file=$(mktemp)
+
+          # Outfiles are opened after all startup options have been parsed.
+          # The deliberately invalid interface lets the program stop before
+          # capture without requiring monitor-mode hardware in CI.
+          timeout 5s ./build/horst --quiet \
+            --interface horst-ci-no-such-if \
+            --outfile "$csv_file" >/dev/null 2>&1 || true
+          grep -q '^TIME, WLAN TYPE, MAC SRC' "$csv_file"
+
+          # Put --output-format after --outfile to verify option ordering does
+          # not accidentally emit a CSV header into a JSONL file.
+          timeout 5s ./build/horst --quiet \
+            --interface horst-ci-no-such-if \
+            --outfile "$json_file" \
+            --output-format jsonl >/dev/null 2>&1 || true
+          test ! -s "$json_file"
+
+  sanitizers:
+    name: Sanitizer build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            libncurses-dev \
+            libnl-3-dev \
+            libnl-genl-3-dev \
+            pkg-config
+
+      - name: Build with ASan and UBSan
+        run: |
+          make clean
+          make V=1 CC=clang \
+            EXTRA_CFLAGS='-O1 -fsanitize=address,undefined -fno-omit-frame-pointer' \
+            EXTRA_LDFLAGS='-fsanitize=address,undefined'

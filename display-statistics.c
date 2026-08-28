@@ -53,12 +53,12 @@ void update_statistics_win(WINDOW *win)
 		return; /* avoid floating point exceptions */
 	}
 
-	mvwprintw(win, 2, 2, "Packets: %d", stats.packets );
-	mvwprintw(win, 3, 2, "Bytes:   %s (%d)",
+	mvwprintw(win, 2, 2, "Packets: %lu", stats.packets );
+	mvwprintw(win, 3, 2, "Bytes:   %s (%lu)",
 		  kilo_mega_ize(stats.bytes), stats.bytes );
-	mvwprintw(win, 4, 2, "Average: ~%d B/Pkt", stats.bytes / stats.packets);
+	mvwprintw(win, 4, 2, "Average: ~%lu B/Pkt", stats.bytes / stats.packets);
 
-	mvwprintw(win, 2, 40, "Retries:       %3.1f%% (%d)",
+	mvwprintw(win, 2, 40, "Retries:       %3.1f%% (%lu)",
 		  stats.retries * 100.0 / stats.packets, stats.retries);
 
 	get_per_second(stats.bytes, stats.duration, stats.packets, stats.retries,
@@ -92,11 +92,11 @@ void update_statistics_win(WINDOW *win)
 			else
 				mvwprintw(win, line, 2, "MCS%d", i - 12);
 			wattroff(win, A_BOLD);
-			mvwprintw(win, line, STAT_PACK_POS, "%8d",
+			mvwprintw(win, line, STAT_PACK_POS, "%8lu",
 				stats.packets_per_rate[i]);
 			mvwprintw(win, line, STAT_BYTE_POS, "%8s",
 				kilo_mega_ize(stats.bytes_per_rate[i]));
-			mvwprintw(win, line, STAT_BPP_POS, "%4d",
+			mvwprintw(win, line, STAT_BPP_POS, "%4lu",
 				stats.bytes_per_rate[i] / stats.packets_per_rate[i]);
 			mvwprintw(win, line, STAT_PP_POS, "%2.1f",
 				stats.packets_per_rate[i] * 100.0 / stats.packets);
@@ -132,11 +132,11 @@ void update_statistics_win(WINDOW *win)
 			wattron(win, A_BOLD);
 			mvwprintw(win, line, 2, "%s", wlan_get_packet_type_name(i));
 			wattroff(win, A_BOLD);
-			mvwprintw(win, line, STAT_PACK_POS, "%8d",
+			mvwprintw(win, line, STAT_PACK_POS, "%8lu",
 				stats.packets_per_type[i]);
 			mvwprintw(win, line, STAT_BYTE_POS, "%8s",
 				kilo_mega_ize(stats.bytes_per_type[i]));
-			mvwprintw(win, line, STAT_BPP_POS, "%4d",
+			mvwprintw(win, line, STAT_BPP_POS, "%4lu",
 				stats.bytes_per_type[i] / stats.packets_per_type[i]);
 			mvwprintw(win, line, STAT_PP_POS, "%2.1f",
 				stats.packets_per_type[i] * 100.0 / stats.packets);

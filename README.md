@@ -1,217 +1,187 @@
-# HORST - Highly Optimized Radio Scanning Tool
-or "Horsts OLSR Radio Scanning Tool"
+# horst — Highly Optimized Radio Scanning Tool
 
-Copyright (C) 2005-2016 Bruno Randolf (br1@einfach.org) and licensed under the 
-GNU Public License (GPL) V2
+`horst` is a small, fast IEEE 802.11 WLAN analyzer with an ncurses interface.
+It sits between simple wireless utilities and heavyweight packet analyzers: the
+focus is a quick operational view of what is happening in the air rather than
+deep inspection of every frame.
 
+This repository is a modernization fork of
+[br101/horst](https://github.com/br101/horst). The original project and history
+remain the foundation; this fork focuses on current Linux systems, safer parsing
+and build tooling, automation-friendly output, modern Wi-Fi PHY support and
+practical troubleshooting workflows.
 
-## Links
+See [ROADMAP.md](ROADMAP.md) for planned work.
 
-* Main page: https://github.com/br101/horst
-* Issue tracker: https://github.com/br101/horst/issues
-* Download Stable (Version 5.1): https://github.com/br101/horst/archive/v5.1.tar.gz
-* Download Development (MASTER): https://github.com/br101/horst/tarball/master
+## What horst shows
 
+- RSSI per station/AP.
+- Channel utilization based on observed frame airtime.
+- Channel/spectrum overview.
+- Packet history with signal, frame type and PHY rate.
+- Stations grouped by ESSID and AP association.
+- Packet/byte/airtime statistics by rate and frame type.
+- Filters for packet type, operating mode, MAC address and BSSID.
+- Remote client/server monitoring.
+- Automatic monitor-interface creation and cleanup.
+- Legacy mesh/IBSS diagnostics inherited from the original project.
 
-## Overview
+## New in this fork
 
-`horst` is a small, lightweight IEEE802.11 WLAN analyzer with a text interface. 
-Its basic function is similar to tcpdump, Wireshark or Kismet, but it's much 
-smaller and shows different, aggregated information which is not easily 
-available from other tools. It is made for debugging wireless LANs with a focus 
-on getting a quick overview instead of deep packet inspection and has special 
-features for Ad-hoc (IBSS) mode and mesh networks. It can be useful to get a 
-quick overview of what's going on all wireless LAN channels and to identify 
-problems.
+The current modernization branch adds:
 
-* Shows signal (RSSI) values per station, something hard to get, especially in 
-  IBSS mode
-* Calculates channel utilization (“usage”) by adding up the amount of time the 
-  packets actually occupy the medium
-* “Spectrum Analyzer” shows signal levels and usage per channel
-* Graphical packet history, with signal, packet type and physical rate
-* Shows all stations per ESSID and the live TSF per node as it is counting
-* Detects IBSS “splits” (same ESSID but different BSSID – this is/was a common 
-  driver problem on IBSS mode)
-* Statistics of packets/bytes per physical rate and per packet type
-* Has some support for mesh protocols (OLSR and batman)
-* Can filter specific packet types, operating modes, source addresses or BSSIDs
-* Client/server support for monitoring on remote nodes
-* Automatically adds and removes monitor interface
+- GNU-style long command-line options while retaining the historical short
+  options.
+- Time-bounded captures with `--duration` / `-T`.
+- Minimum-RSSI filtering with `--filter-signal`.
+- JSON Lines export with `--output-format jsonl`.
+- GCC, Clang, ASan and UBSan CI builds.
+- Correct HT40 center-frequency handling in CLI channel selection.
 
-`horst` is a Linux program and can be used on any wireless LAN interface which 
-supports monitor mode.
+Examples:
 
+```bash
+# Interactive capture
+sudo horst --interface wlan0
 
-## Checkout
+# Run for 30 seconds
+sudo horst --interface wlan0 --duration 30
 
-If you just want to use `horst`, the recommended way is to download the latest
-stable version from https://github.com/br101/horst/releases or to use the
-stable branch:
+# Ignore weak frames below -75 dBm
+sudo horst --interface wlan0 --filter-signal -75
 
-	git clone -b stable https://github.com/br101/horst
+# Headless 15-second JSONL capture
+sudo horst --interface wlan0 --quiet --duration 15 \
+  --outfile scan.jsonl --output-format jsonl
+```
 
-Note: The `master` branch is in heavy restructuring mode right now, as it is
-switching to use `libuwifi` (https://github.com/br101/libuwifi).
+## Requirements
 
-The master branch of `horst` builds on `libuwifi` as a git submodule and
-`libuwifi` in turn includes `radiotap` as a submodule. With newer versions of
-git the easiest way to check out is:
+On Debian/Ubuntu:
 
-	git clone --recursive https://github.com/br101/horst
+```bash
+sudo apt install build-essential libncurses-dev libnl-3-dev \
+  libnl-genl-3-dev pkg-config
+```
 
-For older versions of git, or if you have already cloned horst before, you can
-use:
+Equivalent development packages are required on other Linux distributions.
+The wireless interface must support monitor mode.
 
-	git submodule update --init --recursive
+## Checkout and build
 
+`libuwifi` is included as a git submodule, and it has its own submodules, so
+clone recursively:
 
-## Dependencies
+```bash
+git clone --recursive https://github.com/iRomanyshyn/horst.git
+cd horst
+make
+```
 
-`horst` is just a simple tool, and `libncurses` and header files is the only
-hard requirement as well as the `pkg-config` tool. Recently we have added support
-for `nl80211` via `libnl`, so on Linux normally you need `libnl3` + header files 
-as well. On Debian/Ubuntu based distros you can install them with:
+If the repository was cloned without submodules:
 
-	sudo apt-get install libncurses5-dev libnl-3-dev libnl-genl-3-dev pkg-config
+```bash
+git submodule update --init --recursive
+make
+```
 
+For verbose or debug builds:
 
-## Building
+```bash
+make V=1
+make DEBUG=1
+```
 
-Building is normally done with "make" (optional `V=1` or `DEBUG=1`). This checks out
-`libuwifi` as a submodule if necessary:
+Install under `/usr/local` by default:
 
-	make
+```bash
+sudo make install
+```
 
-If you want to maintain `libuwifi` not as a submodule but in a directory outside
-of `horst` you can specify it with:
+`PREFIX` and `DESTDIR` are supported by the Makefile.
 
-	make LIBUWIFI=../my/path/to/libuwifi
+## Monitor mode
 
-Should you expect on `libuwifi` in the system path (`/usr/local/include/` and
-`/usr/local/lib/` or similar) you can do:
+`horst` can create a virtual monitor interface automatically. You can also make
+one manually while keeping the normal interface present:
 
-	make LIBUWIFI=
+```bash
+sudo iw wlan0 interface add mon0 type monitor
+sudo ip link set mon0 up
+sudo horst --interface mon0
+```
 
-To install (with optional `DESTDIR=/path`):
+If the physical radio is simultaneously in use as an associated client or AP,
+the driver normally cannot let `horst` freely hop channels without disrupting
+that connection. For channel scanning, use a dedicated radio or place the radio
+fully into monitor mode.
 
-	sudo make install
+## Output
 
+The historical CSV format remains the default:
 
-## Config and other files
+```bash
+sudo horst -i wlan0 -o capture.csv
+```
 
-By default `horst` reads a config file `/etc/horst.conf`. The location of the file
-can be changed with the `-c file` command line option. See the file itself or
-`man horst.conf` for a description of the options.
+JSON Lines is intended for scripting, `jq`, log pipelines and later survey
+analysis:
 
-You can use `-Mfilename` to define a MAC address to host name mapping file which
-can either be a `dhcp.leases` file or simply contain `MAC-Address<whitesspace>Name`
-one each line.
+```bash
+sudo horst -i wlan0 -q -T 10 -o capture.jsonl --output-format jsonl
+```
 
-`-o outfile` can write the packets to a comma separated list file.
+## Configuration
 
-`-X[filename]` is not a real file, but allows a control socket named pipe which can
-later be used with `-x command` to send commands in the same format as the options
-in the config file.
+The default configuration file is `/etc/horst.conf`; use `-c` / `--config` to
+select another one. See `horst.conf`, `horst.conf.5`, and `horst.8` for the
+available settings and command-line options.
 
+A MAC-to-name mapping can be loaded with `-M` / `--mac_names`. The input can be
+a dnsmasq `dhcp.leases` file or simple `MAC whitespace NAME` lines.
 
-## Usage notes
+## Remote monitoring
 
-Starting with version 5.0 `horst` can automatically set the WLAN interface into
-monitor mode or add a monitor interface. But you can still set the interface into
-monitor mode manually before you start `horst` as well. With most standard 
-Linux (mac80211) drivers you can use the `iw` command to add an additional 
-monitor interface while you can continue to use the existing interface.
+Start a headless server on the capture node:
 
-	iw wlan0 interface add mon0 type monitor
+```bash
+sudo horst --interface wlan0 --server --quiet
+```
 
-Please note that while the main interface (`wlan0`) is in use, either as a client
-to an AP, in Ad-hoc mode, or creating an AP, the wifi driver does not allow 
-`horst` to change the channel because that would disrupt connectivity. If you 
-want `horst` to be able to change channels (`horst -s` or `channel_scan` 
-option, or setting a channel manually in the `horst` UI) you need to set the main
-interface to monitor mode. This is how it is usually done:
+Connect from another host:
 
-	ifconfig wlan0 down
-	iw wlan0 set type monitor
+```bash
+horst --client 192.0.2.10
+```
 
-Optionally you could also set an initial channel, and it sometimes may be necessary
-to unblock the interface first:
+The inherited remote protocol is old, IPv4-only and unauthenticated. Treat it as
+trusted-network functionality for now; redesigning it is on the roadmap. Use an
+SSH tunnel when crossing an untrusted network.
 
-	rfkill unblock all
-	ifconfig wlan0 up
-	iw wlan0 set channel 6
+## Project direction
 
-If you still have to use the deprecated WEXT interface can put the interface into
-monitor mode with `iwconfig wlan0 mode monitor channel X`).
+The main modernization targets are:
 
-Usually you have to start `horst` as root:
+1. VHT/HE/EHT-aware PHY metadata: MCS, NSS, bandwidth, GI, 6 GHz and eventually
+   Wi-Fi 7 data where radiotap/driver support permits it.
+2. Correct and useful airtime analysis per client, BSSID and SSID.
+3. A troubleshooting-oriented TUI: AP-to-client tree, retry/airtime hot spots,
+   sortable views and interactive filtering.
+4. Modern security decoding: WPA2/WPA3, SAE, OWE, Enterprise and PMF.
+5. Roaming and association event timelines.
+6. Safer, versioned remote collectors and PCAPNG export.
 
-	sudo horst -i wlan0
+The intent is to keep horst lightweight. Wireshark remains the right tool for
+deep packet inspection; horst should tell you quickly where to look.
 
-To do remote monitoring over the network you can start a server (-q without a 
-user interface), usually on your AP or device with
+## License and upstream
 
-	horst -i wlan0 -N -q
+Copyright © 2005–2016 Bruno Randolf and contributors, plus subsequent fork
+contributors. Licensed under GPL-2.0-or-later as described by the source files
+and repository license.
 
-and connect a client (only one client is allowed at a time), usually from your 
-PC with
+Original upstream: <https://github.com/br101/horst>
 
-	horst -n IP
-
-Please read the man page for more details about the options, output and 
-abbreviations. It should be be part of your distribution package, but you can 
-read it in the source code locally with:
-
-	man -l horst.8
-	man -l horst.conf.5
-
-Please contact me if you have any problems or questions. New feature ideas, 
-patches and feedback are always welcome. Please create GitHub issues at 
-https://github.com/br101/horst/issues for problem reports and support. 
-
-
-## Background and history
-
-`horst` was created in 2005 to fill a need in the Wireless Mesh networking and 
-Freifunk community of Berlin but has since grown to be a useful tool for
-debugging any kind of wireless network.
-
-A notorious Berlin Freifunk community member known as "Offline Horst" had enough
-persistence to convince me that such a tool is necessary and thus started the
-development and gave the name to the `horst` tool.
-
-With the usual wireless tools like iw, iwconfig and iwspy and even kismet or 
-WireShark it is hard to measure the received signal strength (RSSI) of
-all available access points, stations and ad-hoc networks in a given location. 
-It's especially difficult to differentiate the different nodes which form an 
-ad-hoc network. This information however is very important for setting up, 
-debugging and optimizing wireless mesh networks and antenna positions.
-
-`horst` aims to fill this gap and lists each single node of an ad-hoc network
-separately, showing the signal strength (RSSI) of the last received packet. This
-way you can see which nodes are part of a specific ad-hoc cell (BSSID), 
-discover problems with ad-hoc cell merging ("cell splitting", a problem of 
-many WLAN drivers) and get a general overview of what's going on in the "air".
-
-To do this, `horst` uses the monitor mode including radiotap headers (or before 
-prism2 headers) for the signal strength information of the wlan cards and 
-listens to all packets which come in the wireless interface. The packets are 
-summarized by the MAC address of the sending node, analyzed and aggregated and 
-displayed in a simple text (ncurses) interface.
-
-
-## Contributors
-
-Thanks to the following persons for contributions:
-
-* Horst Krause
-* Sven-Ola Tuecke
-* Robert Schuster
-* Jonathan Guerin
-* David Rowe
-* Antoine Beaupré
-* Rami Refaeli
-* Joerg Albert
-* Tuomas Räsänen
-* Jiantao Fu
+Original contributors include Horst Krause, Sven-Ola Tuecke, Robert Schuster,
+Jonathan Guerin, David Rowe, Antoine Beaupré, Rami Refaeli, Joerg Albert,
+Tuomas Räsänen and Jiantao Fu.
