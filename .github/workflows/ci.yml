@@ -41,6 +41,14 @@ jobs:
           CC: ${{ matrix.compiler }}
         run: make V=1
 
+      - name: CLI smoke tests
+        run: |
+          ./build/horst --version
+          ./build/horst --help > /tmp/horst-help.txt
+          grep -q -- '--duration' /tmp/horst-help.txt
+          grep -q -- '--filter-signal' /tmp/horst-help.txt
+          grep -q -- '--output-format' /tmp/horst-help.txt
+
   sanitizers:
     name: Sanitizer build
     runs-on: ubuntu-24.04
