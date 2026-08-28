@@ -23,7 +23,7 @@
 #include <stdlib.h>
 #include <time.h>
 
-#undef LIST_HEAD 
+#undef LIST_HEAD
 #include <uwifi/cc_list.h>
 #include <uwifi/average.h>
 #include <uwifi/channel.h>
@@ -61,6 +61,11 @@
 #define MAX_CONF_NAME_STRLEN	32
 #define MAX_FILTERMAC		9
 
+enum output_format {
+	OUTPUT_FORMAT_CSV = 0,
+	OUTPUT_FORMAT_JSONL,
+};
+
 struct config {
 	struct uwifi_interface	intf;
 	int			port;
@@ -68,6 +73,9 @@ struct config {
 	int			display_interval;
 	char			display_view;
 	char			dumpfile[MAX_CONF_VALUE_STRLEN + 1];
+	enum output_format	output_format;
+	unsigned int		duration;
+	int			filter_signal;
 	int			recv_buffer_size;
 	char			serveraddr[MAX_CONF_VALUE_STRLEN + 1];
 	char			control_pipe[MAX_CONF_VALUE_STRLEN + 1];
